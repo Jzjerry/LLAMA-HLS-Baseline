@@ -5,7 +5,8 @@
 #include "config.h"     // Defines constants like dim, GS, etc.
 #include "typedefs.h"   // Defines Config, Transformer, QuantizedTensor structs etc. (NOW CORRECTED)
 #include <cstring>      // For memcpy, memset
-#include <cmath>        // For fabs, round, sqrtf, expf, cosf, sinf, powf
+#include "hls_math.h"  // For hls_math functions like sqrtf, expf, cosf, sinf, powf
+// #include <cmath>        // For fabs, round, sqrtf, expf, cosf, sinf, powf
 
 
 // ----------------------------------------------------------------------------
@@ -98,8 +99,8 @@ void quantize(QuantizedTensor<S, GROUP_SIZE> *qx, const float x[S], int group_si
 
 main_loop:
     for (int group = 0; group < num_groups; group++) {
-#pragma HLS UNROLL factor = 4 // Example factor, adjust as needed
-#pragma HLS PIPELINE
+        #pragma HLS UNROLL factor = 4 // Example factor, adjust as needed
+        #pragma HLS PIPELINE
         float wmax = 0.0;
         // Use 'group_size' parameter
         int base_idx = group * group_size;
@@ -107,8 +108,8 @@ main_loop:
     max_val_loop:
         // Use 'group_size' parameter
         for (int i = 0; i < group_size; i++) {
-#pragma HLS PIPELINE // Inner loop pipeline may or may not be needed/beneficial
-            float val = fabs(x[base_idx + i]);
+        #pragma HLS PIPELINE // Inner loop pipeline may or may not be needed/beneficial
+            float val = hls::fabs(x[base_idx + i]);
             if (val > wmax) {
                 wmax = val;
             }
@@ -121,12 +122,12 @@ main_loop:
     quant_loop:
         // Use 'group_size' parameter
         for (int i = 0; i < group_size; i++) {
-#pragma HLS PIPELINE // Inner loop pipeline may or may not be needed/beneficial
+        #pragma HLS PIPELINE // Inner loop pipeline may or may not be needed/beneficial
             float quant_value = (scale != 0.0f) ? (x[base_idx + i] * inv_scale) : 0.0f;
             // Clamp using ternary operators or std::min/max if available/synthesizable
             quant_value = (quant_value > Q_MAX) ? Q_MAX : quant_value;
             quant_value = (quant_value < -Q_MAX) ? -Q_MAX : quant_value;
-            int8_t quantized = (int8_t)roundf(quant_value);
+            int8_t quantized = (int8_t)hls::roundf(quant_value);
             quantized_buffer[base_idx + i] = quantized;
         }
     }
@@ -161,7 +162,7 @@ sum_of_squares:
     }
     ss /= S;
     ss += 1e-5f;
-    ss = 1.0f / sqrtf(ss);
+    ss = 1.0f / hls::sqrtf(ss);
 
 norm_and_scale:
     for (int j = 0; j < S; j++) {
@@ -193,7 +194,7 @@ exp_sum: // Merged loop from previous example version
 #pragma HLS loop_tripcount min = 1 max = seq_len avg = seq_len/2
 #pragma HLS PIPELINE II=1
 #pragma HLS UNROLL factor = 2 // Example factor
-        buffer[i] = expf(x[i] - max_val);
+        buffer[i] = hls::expf(x[i] - max_val);
         sum += buffer[i];
     }
     const float inv_sum = (sum == 0.0f) ? 0.0f : 1.0f / sum;
@@ -224,52 +225,52 @@ void matmul(float *xout, const int8_t *xq, const float *xs, const int8_t *wq, co
 
 x_buff:
     for (int i = 0; i < N; i++) {
-#pragma HLS UNROLL factor = 2 // Example factor
+    #pragma HLS UNROLL factor = 2 // Example factor
         x_buffer[i] = xq[i];
     }
 xs_buff:
      // 加载对应分组的 scale 因子
      for (int j = 0; j < N / GS; j++) { // Loop over groups
- #pragma HLS UNROLL factor = 2 // Example factor
+         #pragma HLS UNROLL factor = 2 // Example factor
          xs_buffer[j] = xs[j]; // Assumes xs directly corresponds to groups
      }
 
 
     for (int i = 0; i < D; i++) { // Loop over output dimension
-#pragma HLS PIPELINE II=1
+        #pragma HLS PIPELINE II=1
         float val = 0.0f;
         int8_t w_buffer[N];
         // 大小基于全局 GS
         float ws_buffer[N / GS];
-#pragma HLS ARRAY_PARTITION variable = w_buffer type = cyclic factor = 2 // Example factor
-#pragma HLS ARRAY_PARTITION variable = ws_buffer type = cyclic factor = 2 // Example factor
+        #pragma HLS ARRAY_PARTITION variable = w_buffer type = cyclic factor = 2 // Example factor
+        #pragma HLS ARRAY_PARTITION variable = ws_buffer type = cyclic factor = 2 // Example factor
 
         const int in_w = i * N;       // Start index in wq for row i
         const int in_s = i * (N / GS); // Start index in ws for row i
 
     load_w: // Load weights for current row
         for (int j = 0; j < N; j++) {
-#pragma HLS UNROLL factor = 2 // Consider full unroll if N is small enough, or partial
+        #pragma HLS UNROLL factor = 2 // Consider full unroll if N is small enough, or partial
             w_buffer[j] = wq[j + in_w];
         }
     load_ws: // Load scales for current row
         for (int j = 0; j < N / GS; j++) { // Loop over groups
-#pragma HLS UNROLL factor = 2 // Consider full unroll if N/GS is small enough, or partial
+        #pragma HLS UNROLL factor = 2 // Consider full unroll if N/GS is small enough, or partial
             ws_buffer[j] = ws[j + in_s]; // Assumes ws directly corresponds to groups
         }
 
         // --- 使用之前重写的计算逻辑 (似乎更适合 HLS) ---
         // Perform dot product using groups
         int32_t group_sum[N/GS];
-#pragma HLS ARRAY_PARTITION variable=group_sum complete // Partition for parallel accumulation
+        #pragma HLS ARRAY_PARTITION variable=group_sum complete // Partition for parallel accumulation
 
     dot_product_groups:
         for (int j = 0; j < N / GS; ++j) { // Loop over groups
-#pragma HLS UNROLL factor = 2// Unroll group calculation
+        #pragma HLS UNROLL factor = 2// Unroll group calculation
             int32_t ival = 0;
         inner_dot:
             for(int k=0; k<GS; ++k) { // Loop within group
-#pragma HLS UNROLL factor = 2// Unroll inner dot product
+            #pragma HLS UNROLL factor = 2// Unroll inner dot product
                 // Use static buffers loaded earlier
                 ival += ((int16_t)x_buffer[j*GS + k]) * ((int16_t)w_buffer[j*GS + k]);
             }
@@ -278,7 +279,7 @@ xs_buff:
 
     final_sum: // Accumulate scaled group results
         for(int j=0; j<N/GS; ++j) { // Loop over groups
-#pragma HLS UNROLL factor = 2// Unroll final summation
+        #pragma HLS UNROLL factor = 2// Unroll final summation
              // Use loaded scales
             val += ((float)group_sum[j]) * ws_buffer[j] * xs_buffer[j];
         }

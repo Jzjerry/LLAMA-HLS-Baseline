@@ -1,8 +1,6 @@
 #include "forward.h" // 包含修正后的声明和类型定义
 #include <cstring>   // For memcpy, memset
-#include <cmath>     // For sqrtf, expf, cosf, sinf, powf
 // Note: hls_stream.h 通常通过 forward.h 包含
-
 
 
 // ============================================================================
@@ -161,9 +159,9 @@ LayerLoop:
                  #pragma HLS PIPELINE II=1
                  int head_dim_rot = i % head_size_local;
                  if (head_size_local == 0) continue;
-                 float freq = 1.0f / powf(10000.0f, (float)head_dim_rot / (float)head_size_local);
+                 float freq = 1.0f / hls::powf(10000.0f, (float)head_dim_rot / (float)head_size_local);
                  float val = pos * freq;
-                 float fcr = cosf(val); float fci = sinf(val);
+                 float fcr = hls::cosf(val); float fci = hls::sinf(val);
                  float v0_q = q[i]; float v1_q = q[i + 1]; q[i] = v0_q * fcr - v1_q * fci; q[i+1] = v0_q * fci + v1_q * fcr;
                  float v0_k = k[i]; float v1_k = k[i + 1]; k[i] = v0_k * fcr - v1_k * fci; k[i+1] = v0_k * fci + v1_k * fcr;
              }
@@ -193,7 +191,7 @@ LayerLoop:
                          #pragma HLS UNROLL factor = ATTN_UNROLL
                          score += q[i + q_offset] * key_cache_ptr[i];
                      }
-                     if (head_size_local > 0) score /= sqrtf((float)head_size_local); else score = 0.0f;
+                     if (head_size_local > 0) score /= hls::sqrtf((float)head_size_local); else score = 0.0f;
                      att[t + att_offset] = score;
                  }
                  softmax<seq_len>(att + att_offset, pos + 1);
@@ -247,7 +245,7 @@ LayerLoop:
                  #pragma HLS UNROLL factor = FFN_UNROLL
                  #pragma HLS PIPELINE II=1
                  float val = hb[i];
-                 val *= (1.0f / (1.0f + expf(-val)));
+                 val *= (1.0f / (1.0f + hls::expf(-val)));
                  val *= hb2[i];
                  hb[i] = val;
              }
