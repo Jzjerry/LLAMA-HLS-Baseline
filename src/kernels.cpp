@@ -15,6 +15,9 @@ typedef ap_int<8> wq_type;
 
 typedef ap_fixed<16,8> fp_type;
 
+const int MATMUL_UNROLL_FACTOR = 8;
+
+
 void matmul(fp_type *xout, const xq_type *xq, const fp_type *xs, const wq_type *wq, const fp_type *ws) {
     // W (d,n) @ x (n,) -> xout (d,)
 
@@ -24,18 +27,18 @@ void matmul(fp_type *xout, const xq_type *xq, const fp_type *xs, const wq_type *
     // 大小基于全局 GS
     fp_type xs_buffer[N / GS];
 
-// #pragma HLS ARRAY_PARTITION variable = x_buffer type = cyclic factor = 2 // Example factor
-// #pragma HLS ARRAY_PARTITION variable = xs_buffer type = cyclic factor = 2 // Example factor
+#pragma HLS ARRAY_PARTITION variable = x_buffer type = cyclic factor = MATMUL_UNROLL_FACTOR // Example factor
+#pragma HLS ARRAY_PARTITION variable = xs_buffer type = cyclic factor = MATMUL_UNROLL_FACTOR // Example factor
 
 x_buff:
     for (int i = 0; i < N; i++) {
-// #pragma HLS UNROLL factor = 2 // Example factor
+#pragma HLS UNROLL factor = MATMUL_UNROLL_FACTOR // Example factor
         x_buffer[i] = xq[i];
     }
 xs_buff:
      // 加载对应分组的 scale 因子
      for (int j = 0; j < N / GS; j++) { // Loop over groups
-//  #pragma HLS UNROLL factor = 2 // Example factor
+ #pragma HLS UNROLL factor = MATMUL_UNROLL_FACTOR // Example factor
          xs_buffer[j] = xs[j]; // Assumes xs directly corresponds to groups
      }
 
@@ -46,35 +49,35 @@ xs_buff:
         wq_type w_buffer[N];
         // 大小基于全局 GS
         fp_type ws_buffer[N / GS];
-// #pragma HLS ARRAY_PARTITION variable = w_buffer type = cyclic factor = 2 // Example factor
-// #pragma HLS ARRAY_PARTITION variable = ws_buffer type = cyclic factor = 2 // Example factor
+#pragma HLS ARRAY_PARTITION variable = w_buffer type = cyclic factor = MATMUL_UNROLL_FACTOR // Example factor
+#pragma HLS ARRAY_PARTITION variable = ws_buffer type = cyclic factor = MATMUL_UNROLL_FACTOR // Example factor
 
         const int in_w = i * N;       // Start index in wq for row i
         const int in_s = i * (N / GS); // Start index in ws for row i
 
     load_w: // Load weights for current row
         for (int j = 0; j < N; j++) {
-// #pragma HLS UNROLL factor = 2 // Consider full unroll if N is small enough, or partial
+#pragma HLS UNROLL factor = MATMUL_UNROLL_FACTOR // Consider full unroll if N is small enough, or partial
             w_buffer[j] = wq[j + in_w];
         }
     load_ws: // Load scales for current row
         for (int j = 0; j < N / GS; j++) { // Loop over groups
-// #pragma HLS UNROLL factor = 2 // Consider full unroll if N/GS is small enough, or partial
+#pragma HLS UNROLL factor = MATMUL_UNROLL_FACTOR // Consider full unroll if N/GS is small enough, or partial
             ws_buffer[j] = ws[j + in_s]; // Assumes ws directly corresponds to groups
         }
 
         // --- 使用之前重写的计算逻辑 (似乎更适合 HLS) ---
         // Perform dot product using groups
         int32_t group_sum[N/GS];
-// #pragma HLS ARRAY_PARTITION variable=group_sum complete // Partition for parallel accumulation
+#pragma HLS ARRAY_PARTITION variable=group_sum complete // Partition for parallel accumulation
 
     dot_product_groups:
         for (int j = 0; j < N / GS; ++j) { // Loop over groups
-// #pragma HLS UNROLL factor = 2// Unroll group calculation
+#pragma HLS UNROLL factor = MATMUL_UNROLL_FACTOR// Unroll group calculation
             int32_t ival = 0;
         inner_dot:
             for(int k=0; k<GS; ++k) { // Loop within group
-// #pragma HLS UNROLL factor = 2// Unroll inner dot product
+#pragma HLS UNROLL factor = MATMUL_UNROLL_FACTOR// Unroll inner dot product
                 // Use static buffers loaded earlier
                 ival += (x_buffer[j*GS + k]) * (w_buffer[j*GS + k]);
             }
@@ -83,7 +86,7 @@ xs_buff:
 
     final_sum: // Accumulate scaled group results
         for(int j=0; j<N/GS; ++j) { // Loop over groups
-// #pragma HLS UNROLL factor = 2// Unroll final summation
+#pragma HLS UNROLL factor = MATMUL_UNROLL_FACTOR// Unroll final summation
              // Use loaded scales
             val += ((fp_type)group_sum[j]) * ws_buffer[j] * xs_buffer[j];
         }
