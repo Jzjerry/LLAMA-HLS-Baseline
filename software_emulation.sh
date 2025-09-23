@@ -16,11 +16,11 @@ mkdir final_norm_classifier_sw_emu
 # ----------------------------------------------------
 # 阶段二：为软件仿真编译三个硬件核
 # ----------------------------------------------------
-v++ -c -t sw_emu --platform xilinx_u55c_gen3x16_xdma_3_202210_1 -k initial_embedding_lookup --config /home/CONNECT/czhang539/llama2-7B-Baseline/sw_emu/hls_config1.cfg -I../src ../src/independent_kernal/ini.cpp -o ./initial_embedding_lookup_sw_emu/initial_embedding_lookup.xo 
+v++ -c -t sw_emu --platform xilinx_u55c_gen3x16_xdma_3_202210_1 -k initial_embedding_lookup --config ./hls_config1.cfg -I../src ../src/independent_kernal/ini.cpp -o ./initial_embedding_lookup_sw_emu/initial_embedding_lookup.xo 
 
-v++ -c -t sw_emu --platform xilinx_u55c_gen3x16_xdma_3_202210_1 -k transformer_layer_pipeline --config /home/CONNECT/czhang539/llama2-7B-Baseline/sw_emu/hls_config2.cfg -I../src ../src//independent_kernal/transformer.cpp -o ./transformer_layer_pipeline_sw_emu/transformer_layer_pipeline.xo 
+v++ -c -t sw_emu --platform xilinx_u55c_gen3x16_xdma_3_202210_1 -k transformer_layer_pipeline --config ./hls_config2.cfg -I../src ../src//independent_kernal/transformer.cpp -o ./transformer_layer_pipeline_sw_emu/transformer_layer_pipeline.xo 
 
-v++ -c -t sw_emu --platform xilinx_u55c_gen3x16_xdma_3_202210_1 -k final_norm_classifier --config /home/CONNECT/czhang539/llama2-7B-Baseline/sw_emu/hls_config3.cfg -I../src ../src//independent_kernal/classifier.cpp -o ./final_norm_classifier_sw_emu/final_norm_classifier.xo 
+v++ -c -t sw_emu --platform xilinx_u55c_gen3x16_xdma_3_202210_1 -k final_norm_classifier --config ./hls_config3.cfg -I../src ../src//independent_kernal/classifier.cpp -o ./final_norm_classifier_sw_emu/final_norm_classifier.xo 
 
 # ----------------------------------------------------
 # 阶段三：链接生成用于软件仿真的 xclbin 文件
