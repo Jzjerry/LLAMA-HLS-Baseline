@@ -63,7 +63,7 @@ extern "C" void transformer_layer_pipeline(
     // --- 顶层接口定义 ---
 #pragma HLS INTERFACE axis port=stream_initial_in name=s_initial_in
 #pragma HLS INTERFACE axis port=stream_final_out name=s_final_out
-#pragma HLS INTERFACE m_axi port=w offset=slave bundle=gmem_w  // 估算深度或移除
+#pragma HLS INTERFACE m_axi port=w offset=slave bundle=gmem_w
 #pragma HLS INTERFACE m_axi port=w_ffn offset=slave bundle=gmem_w_ffn  
 #pragma HLS INTERFACE m_axi port=key_cache offset=slave bundle=gmem_kvc depth=n_layers*seq_len*kv_dim latency=100 num_read_outstanding=32 num_write_outstanding=32
 #pragma HLS INTERFACE m_axi port=value_cache offset=slave bundle=gmem_kvc depth=n_layers*seq_len*kv_dim latency=100 num_read_outstanding=32 num_write_outstanding=32
@@ -141,7 +141,6 @@ LayerLoop:
         // ===== ATTENTION BLOCK LOGIC =====
         // ===================================
         // (将 attention_block 的逻辑复制到这里, 使用 current_x 作为输入)
-
         // --- Attention RMSNorm --- (输入: current_x, 输出: xb_attn)
         rmsnorm<dim>(xb_attn, current_x, w->rms_att_weight + l * dim); // 使用 l
 
@@ -310,7 +309,7 @@ final_norm_classifier(
     // Read input stream
 read_x_stream_final:
     for (int i = 0; i < dim; ++i) {
-#pragma HLS PIPELINE II=1
+        #pragma HLS PIPELINE II=1
         x_local[i] = stream_in_x.read();
     }
 

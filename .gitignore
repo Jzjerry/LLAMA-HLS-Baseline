@@ -1,7 +1,9 @@
 csim
 synth
+sw_emu
 hw_end1
 
+.Xil
 
 *.exe
 *.bin

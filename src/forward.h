@@ -207,7 +207,7 @@ norm:
     }
 }
 
-const int MATMUL_UNROLL_FACTOR = 8;
+const int MATMUL_UNROLL_FACTOR = 2;
 
 template <int N, int D>
 // const 限定符已在上次修正中添加
@@ -268,11 +268,11 @@ xs_buff:
 
     dot_product_groups:
         for (int j = 0; j < N / GS; ++j) { // Loop over groups
-        #pragma HLS UNROLL factor = MATMUL_UNROLL_FACTOR// Unroll group calculation
+        // #pragma HLS UNROLL factor = MATMUL_UNROLL_FACTOR// Unroll group calculation
             int32_t ival = 0;
         inner_dot:
             for(int k=0; k<GS; ++k) { // Loop within group
-            #pragma HLS UNROLL factor = MATMUL_UNROLL_FACTOR// Unroll inner dot product
+            // #pragma HLS UNROLL factor = MATMUL_UNROLL_FACTOR// Unroll inner dot product
                 // Use static buffers loaded earlier
                 ival += ((int16_t)x_buffer[j*GS + k]) * ((int16_t)w_buffer[j*GS + k]);
             }
