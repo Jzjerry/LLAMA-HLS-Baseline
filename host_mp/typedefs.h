@@ -5,7 +5,7 @@
 #include <stdio.h>
 // Include config.h here if GS is needed globally, or ensure it's included before typedefs.h
 #include "config.h" // Provides dim, hidden_dim, ..., GS
-#include <ap_int.h>
+// #include <ap_int.h>
 
 //===========================================================================
 //  typedefs.h
@@ -13,35 +13,21 @@
 //  @brief: Defines core data structures for the transformer model.
 
 // Activation Precisions
-typedef ap_int<4> xq_attn_t;
-typedef ap_int<4> xq_ffn_t;
-typedef ap_int<4> hq_t;
-typedef ap_int<8> xq_t;
+// typedef ap_int<4> xq_attn_t;
+// typedef ap_int<4> xq_ffn_t;
+// typedef ap_int<4> hq_t;
+// typedef int8_t xq_t;
 
 // Weight Precisions
-typedef ap_int<4> wq_t;
-typedef ap_int<4> wk_t;
-typedef ap_int<4> wv_t;
-typedef ap_int<4> wo_t;
-typedef ap_int<4> w1_t;
-typedef ap_int<4> w2_t;
-typedef ap_int<4> w3_t;
+// typedef int8_t wq_t;
+// typedef int8_t wk_t;
+// typedef int8_t wv_t;
+// typedef int8_t wo_t;
+// typedef int8_t w1_t;
+// typedef int8_t w2_t;
+// typedef int8_t w3_t;
 
-typedef ap_int<8> wcls_t;
-
-// Configuration structure remains the same
-struct Config
-{
-    int dim;        // transformer dimension
-    int hidden_dim; // for ffn layers
-    int n_layers;   // number of layers
-    int n_heads;    // number of query heads
-    int n_kv_heads; // number of key/value heads
-    int vocab_size; // vocabulary size
-    int seq_len;    // max sequence length
-    int GS;         // group size for quantization
-    int kv_dim;     // Dimension of key/value vectors
-};
+// typedef int8_t wcls_t;
 
 // --- CORRECTED QuantizedTensor definition ---
 // Now takes GROUP_SIZE as a template parameter
@@ -55,25 +41,6 @@ struct QuantizedTensor
 
     DT q[SIZE];             // quantized values
     float s[SIZE / GROUP_SIZE]; // scaling factors (one per group) - CORRECTED SIZE
-};
-
-template <typename T>
-struct QuantTraits {
-    static constexpr int width = sizeof(T) * 8;
-    // (1 << (N-1)) - 1.  Example: int8 -> (1<<7)-1 = 127
-    static constexpr float qmax = (float)((1LL << (width - 1)) - 1);
-};
-
-template <int W>
-struct QuantTraits<ap_int<W>> {
-    static constexpr int width = W;
-    static constexpr float qmax = (float)((1LL << (W - 1)) - 1);
-};
-
-template <>
-struct QuantTraits<int8_t> {
-    static constexpr int width = 8;
-    static constexpr float qmax = (float)(127.0);
 };
 
 // --- UPDATED RunState to use corrected QuantizedTensor ---
@@ -113,7 +80,7 @@ struct TransformerWeights
 
     // token embedding table
     // Pass GS as the GROUP_SIZE template parameter
-    QuantizedTensor<ap_int<8>, vocab_size * dim, GS> q_tokens[1]; // (vocab_size, dim) - Size 1 array? Check usage.
+    QuantizedTensor<int8_t, vocab_size * dim, GS> q_tokens[1]; // (vocab_size, dim) - Size 1 array? Check usage.
     float token_embedding_table[vocab_size * dim];     // same, but dequantized
 
     // weights for rmsnorms (float, no change needed here)
@@ -122,21 +89,21 @@ struct TransformerWeights
 
     // weights for matmuls. Pass GS as GROUP_SIZE template parameter
     // Note: SIZE calculation based on OutputDim * InputDim appears correct.
-    QuantizedTensor<ap_int<8>, dim * dim, GS>          wq[n_layers]; // (layer, dim, dim)
-    QuantizedTensor<ap_int<8>, kv_dim_calc * dim, GS>  wk[n_layers]; // (layer, kv_dim, dim)
-    QuantizedTensor<ap_int<8>, kv_dim_calc * dim, GS>  wv[n_layers]; // (layer, kv_dim, dim)
-    QuantizedTensor<ap_int<8>, dim * dim, GS>          wo[n_layers]; // (layer, dim, dim)
+    QuantizedTensor<int8_t, dim * dim, GS>          wq[n_layers]; // (layer, dim, dim)
+    QuantizedTensor<int8_t, kv_dim_calc * dim, GS>  wk[n_layers]; // (layer, kv_dim, dim)
+    QuantizedTensor<int8_t, kv_dim_calc * dim, GS>  wv[n_layers]; // (layer, kv_dim, dim)
+    QuantizedTensor<int8_t, dim * dim, GS>          wo[n_layers]; // (layer, dim, dim)
 
     // weights for ffn. Pass GS as GROUP_SIZE template parameter
-    QuantizedTensor<ap_int<8>, hidden_dim * dim, GS>   w1[n_layers]; // (layer, hidden_dim, dim)
-    QuantizedTensor<ap_int<8>, dim * hidden_dim, GS>   w2[n_layers]; // (layer, dim, hidden_dim)
-    QuantizedTensor<ap_int<8>, hidden_dim * dim, GS>   w3[n_layers]; // (layer, hidden_dim, dim)
+    QuantizedTensor<int8_t, hidden_dim * dim, GS>   w1[n_layers]; // (layer, hidden_dim, dim)
+    QuantizedTensor<int8_t, dim * hidden_dim, GS>   w2[n_layers]; // (layer, dim, hidden_dim)
+    QuantizedTensor<int8_t, hidden_dim * dim, GS>   w3[n_layers]; // (layer, hidden_dim, dim)
 
     // final rmsnorm (float, no change needed here)
     float rms_final_weight[dim]; // (dim,)
 
     // classifier weights. Pass GS as GROUP_SIZE template parameter
-    QuantizedTensor<ap_int<8>, vocab_size * dim, GS>   wcls[1]; // Size 1 array? Check usage.
+    QuantizedTensor<int8_t, vocab_size * dim, GS>   wcls[1]; // Size 1 array? Check usage.
 };
 
 // ----------------------------------------------------------------------------

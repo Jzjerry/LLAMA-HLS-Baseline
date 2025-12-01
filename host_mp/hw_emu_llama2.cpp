@@ -1,58 +1,88 @@
 /* Inference for Llama-2 Transformer model in pure C, int8 quantized forward pass. */
-#include "config.h"   // Defines model parameters (dim, hidden_dim, etc.) - Provides global GS
-#include "forward.h"  // Declares kernel functions, helper templates (quantize/dequantize), and types
-#include "typedefs.h" // Contains corrected type definitions (QuantizedTensor<SIZE, GROUP_SIZE>, etc.)
-#include <cstring>
-#include <ctype.h>
-#include <fcntl.h>
-#include <iostream>
-#include <math.h>
-#include <hls_math.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string>
+#include <ctype.h>
+#include <stdint.h>
 #include <time.h>
-#include "hls_stream.h" // HLS Stream header
+#include <math.h>
+#include <string>
+#include <iostream>
+#include <cstring>
+#include <fcntl.h>
+#include "typedefs.h"
+#include "forward.h"
+#include "config.h"
+#include <vector>
+#include <xrt/xrt_bo.h>
+#include <xrt/xrt_device.h>
+#include <xrt/xrt_kernel.h>
 #include <string>
 #include <cstdlib> // 关键：包含这个头文件以使用 getenv
-#include <ap_int.h>
-// No XRT includes for csim
 #if defined _WIN32
 #include "win.h"
 #else
-#include <sys/mman.h>
 #include <unistd.h>
+#include <sys/mman.h>
 #endif
 // ----------------------------------------------------------------------------
-// Globals and Helper Functions
+// Globals
 
-// Softmax (CPU version for sampling - unchanged)
-void softmax(float *x, int size) {
-    if (size <= 0) return; // Handle empty case
-    float max_val = x[0];
-    for (int i = 1; i < size; i++) {
-        if (x[i] > max_val) {
-            max_val = x[i];
-        }
+// void malloc_run_state(RunState *s, Config *p)
+// {
+//   // we calloc instead of malloc to keep valgrind happy
+//   int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
+//   s->x = (float *)calloc(p->dim, sizeof(float));
+//   s->xb = (float *)calloc(p->dim, sizeof(float));
+//   s->xb2 = (float *)calloc(p->dim, sizeof(float));
+//   s->hb = (float *)calloc(p->hidden_dim, sizeof(float));
+//   s->hb2 = (float *)calloc(p->hidden_dim, sizeof(float));
+//   s->xq = (QuantizedTensor){.q = (int8_t *)calloc(p->dim, sizeof(int8_t)), .s = (float *)calloc(p->dim, sizeof(float))};
+//   s->hq = (QuantizedTensor){.q = (int8_t *)calloc(p->hidden_dim, sizeof(int8_t)), .s = (float *)calloc(p->hidden_dim, sizeof(float))};
+//   s->q = (float *)calloc(p->dim, sizeof(float));
+//   s->k = (float *)calloc(kv_dim, sizeof(float));
+//   s->v = (float *)calloc(kv_dim, sizeof(float));
+//   s->att = (float *)calloc(p->n_heads * p->seq_len, sizeof(float));
+//   s->logits = (float *)calloc(p->vocab_size, sizeof(float));
+//   s->key_cache = (float *)calloc(p->n_layers * p->seq_len * kv_dim, sizeof(float));
+//   s->value_cache = (float *)calloc(p->n_layers * p->seq_len * kv_dim, sizeof(float));
+//   // ensure all mallocs went fine
+//   if (!s->x || !s->xb || !s->xb2 || !s->hb || !s->hb2 || !s->q || !s->k || !s->v || !s->att || !s->logits || !s->key_cache || !s->value_cache)
+//   {
+//     fprintf(stderr, "malloc failed!\n");
+//     exit(EXIT_FAILURE);
+//   }
+// }
+
+void softmax(float *x, int size)
+{
+  // find max value (for numerical stability)
+  float max_val = x[0];
+  for (int i = 1; i < size; i++)
+  {
+    if (x[i] > max_val)
+    {
+      max_val = x[i];
     }
-    float sum = 0.0f;
-    for (int i = 0; i < size; i++) {
-        x[i] = expf(x[i] - max_val);
-        sum += x[i];
-    }
-    // Avoid division by zero
-    float inv_sum = (sum == 0.0f) ? 0.0f : (1.0f / sum);
-    for (int i = 0; i < size; i++) {
-        x[i] *= inv_sum;
-    }
+  }
+  // exp and sum
+  float sum = 0.0f;
+  for (int i = 0; i < size; i++)
+  {
+    x[i] = expf(x[i] - max_val);
+    sum += x[i];
+  }
+  // normalize
+  for (int i = 0; i < size; i++)
+  {
+    x[i] /= sum;
+  }
 }
 
 // --- CORRECTED init_quantized_tensors ---
 // Takes GROUP_SIZE as template param, uses group_size func param internally
-template <int WIDTH, int SIZE, int GROUP_SIZE> // Added GROUP_SIZE template param
+template <int SIZE, int GROUP_SIZE> // Added GROUP_SIZE template param
 void init_quantized_tensors(void **ptr,
-                            QuantizedTensor<ap_int<8>, SIZE, GROUP_SIZE> *tensor, // Use corrected type
+                            QuantizedTensor<SIZE, GROUP_SIZE> *tensor, // Use corrected type
                             int n,           // Number of tensors in the array
                             int size_each,   // Number of elements (like dim*dim) in ONE tensor's q array
                             int group_size)  // Explicit group size parameter
@@ -68,16 +98,10 @@ void init_quantized_tensors(void **ptr,
     void *p = *ptr;
     const int scale_count_each = size_each / group_size; // Number of scales per tensor
 
-    int size = size_each / (8 / WIDTH);
-
     for (int i = 0; i < n; i++) {
         // Copy quantized values (q)
-        std::memcpy(tensor[i].q, p, size);
-        p = (ap_int<8> *)p + size; // Advance pointer past q data
-        // Check data
-        // if (i == 0){
-        //     printf("First Element %o \n", *(uint32_t*)tensor[i].q);
-        // }
+        std::memcpy(tensor[i].q, p, size_each * sizeof(int8_t));
+        p = (int8_t *)p + size_each; // Advance pointer past q data
 
         // Copy scale factors (s) - size is scale_count_each
         std::memcpy(tensor[i].s, p, scale_count_each * sizeof(float));
@@ -85,7 +109,6 @@ void init_quantized_tensors(void **ptr,
     }
     *ptr = p; // Update the original pointer
 }
-
 
 // --- UPDATED memory_map_weights ---
 // Uses distinct template name group_size_gs, passes it to helpers
@@ -112,34 +135,35 @@ bool memory_map_weights(
 
     // Map Quantized Tensors using the corrected init function
     // Pass group_size_gs explicitly
-    init_quantized_tensors<8, vocab_size * dim, group_size_gs>(&ptr, w->q_tokens, 1, vocab_size * dim, group_size_gs);
+    init_quantized_tensors<vocab_size * dim, group_size_gs>(&ptr, w->q_tokens, 1, vocab_size * dim, group_size_gs);
 
     // Dequantize token embeddings (call the function defined in forward.h)
     // Pass group_size_gs explicitly
     // Note: q_tokens is array size 1, so access [0]
-    dequantize<ap_int<8>, vocab_size * dim, group_size_gs>(&(w->q_tokens[0]), w->token_embedding_table, group_size_gs);
+    dequantize<vocab_size * dim, group_size_gs>(&(w->q_tokens[0]), w->token_embedding_table, group_size_gs);
 
     // Map Attention weights
-    init_quantized_tensors<4, dim * dim, group_size_gs>         (&ptr, w->wq, n_layers, dim * dim, group_size_gs);
-    init_quantized_tensors<4, kv_dim_calc * dim, group_size_gs> (&ptr, w->wk, n_layers, kv_dim_calc * dim, group_size_gs);
-    init_quantized_tensors<4, kv_dim_calc * dim, group_size_gs> (&ptr, w->wv, n_layers, kv_dim_calc * dim, group_size_gs);
-    init_quantized_tensors<4, dim * dim, group_size_gs>         (&ptr, w->wo, n_layers, dim * dim, group_size_gs);
+    init_quantized_tensors<dim * dim, group_size_gs>         (&ptr, w->wq, n_layers, dim * dim, group_size_gs);
+    init_quantized_tensors<kv_dim_calc * dim, group_size_gs> (&ptr, w->wk, n_layers, kv_dim_calc * dim, group_size_gs);
+    init_quantized_tensors<kv_dim_calc * dim, group_size_gs> (&ptr, w->wv, n_layers, kv_dim_calc * dim, group_size_gs);
+    init_quantized_tensors<dim * dim, group_size_gs>         (&ptr, w->wo, n_layers, dim * dim, group_size_gs);
 
     // Map FFN weights
-    init_quantized_tensors<4, hidden_dim * dim, group_size_gs>  (&ptr, w->w1, n_layers, hidden_dim * dim, group_size_gs);
-    init_quantized_tensors<4, dim * hidden_dim, group_size_gs>  (&ptr, w->w2, n_layers, dim * hidden_dim, group_size_gs);
-    init_quantized_tensors<4, hidden_dim * dim, group_size_gs>  (&ptr, w->w3, n_layers, hidden_dim * dim, group_size_gs);
+    init_quantized_tensors<hidden_dim * dim, group_size_gs>  (&ptr, w->w1, n_layers, hidden_dim * dim, group_size_gs);
+    init_quantized_tensors<dim * hidden_dim, group_size_gs>  (&ptr, w->w2, n_layers, dim * hidden_dim, group_size_gs);
+    init_quantized_tensors<hidden_dim * dim, group_size_gs>  (&ptr, w->w3, n_layers, hidden_dim * dim, group_size_gs);
 
     // Map Classifier weights
     if (shared_classifier) {
         // Simply copy the pointer/data structure if weights are shared
         // Ensure the QuantizedTensor struct allows copying if needed, or just copy data.
-        std::memcpy(w->wcls, w->q_tokens, sizeof(QuantizedTensor<wcls_t, vocab_size * dim, group_size_gs>));
+        std::memcpy(w->wcls, w->q_tokens, sizeof(QuantizedTensor<vocab_size * dim, group_size_gs>));
     } else {
-        init_quantized_tensors<8, vocab_size * dim, group_size_gs>(&ptr, w->wcls, 1, vocab_size * dim, group_size_gs);
+        init_quantized_tensors<vocab_size * dim, group_size_gs>(&ptr, w->wcls, 1, vocab_size * dim, group_size_gs);
     }
     return true;
 }
+
 
 // --- UPDATED read_checkpoint ---
 // Uses distinct template name group_size_gs
@@ -232,6 +256,7 @@ bool read_checkpoint(
     return true;
 }
 
+
 // --- UPDATED build_transformer ---
 // Passes group_size_gs template parameter correctly
 template <int dim, int hidden_dim, int n_layers, int n_heads, int n_kv_heads,
@@ -248,8 +273,8 @@ bool build_transformer(
 }
 
 
-// Tokenizer struct and functions (assuming no changes needed)
-// ... (Tokenizer code as provided before) ...
+// ----------------------------------------------------------------------------
+
 typedef struct { char *str; int id; } TokenIndex;
 typedef struct { char **vocab; float *vocab_scores; TokenIndex *sorted_vocab; int vocab_size; unsigned int max_token_length; unsigned char byte_pieces[512]; } Tokenizer;
 int compare_tokens(const void *a, const void *b) { return strcmp(((TokenIndex *)a)->str, ((TokenIndex *)b)->str); }
@@ -276,42 +301,47 @@ bool build_tokenizer(Tokenizer *t, std::string tokenizer_path, int vocab_size) {
     for (int i = 0; i < 256; i++) { t->byte_pieces[i * 2] = (unsigned char)i; t->byte_pieces[i * 2 + 1] = '\0'; }
     return true;
  }
-void free_tokenizer(Tokenizer *t) { if (!t) return; for (int i = 0; i < t->vocab_size; i++) { free(t->vocab[i]); } free(t->vocab); free(t->vocab_scores); free(t->sorted_vocab); }
-char* decode(Tokenizer *t, int prev_token, int token) { if (token < 0 || token >= t->vocab_size) return NULL; char *piece = t->vocab[token]; if (prev_token == 1 && piece[0] == ' ') { piece++; } return piece; }
-void safe_printf(char *piece) { if (piece == NULL || piece[0] == '\0') { return; } if (piece[1] == '\0') { unsigned char byte_val = piece[0]; if (!(isprint(byte_val) || byte_val == '\n')) { printf("?"); } else { printf("%c", byte_val); } } else { printf("%s", piece); } }
-int str_lookup(char *str, TokenIndex *sorted_vocab, int vocab_size) { if (!str || !sorted_vocab) return -1; TokenIndex tok = {.str = str}; TokenIndex *res = (TokenIndex *)bsearch(&tok, sorted_vocab, vocab_size, sizeof(TokenIndex), compare_tokens); return res != NULL ? res->id : -1; }
-void encode(Tokenizer *t, char *text, int8_t bos, int8_t eos, int *tokens, int *n_tokens) { /* ... implementation ... */
-    if (text == NULL) { fprintf(stderr, "cannot encode NULL text\n"); exit(EXIT_FAILURE); }
-    size_t text_len = strlen(text);
-    int *str_buffer = (int *)malloc((text_len + 1) * sizeof(int)); // Use size_t for strlen result
-    if (!str_buffer) { fprintf(stderr, "malloc failed\n"); exit(EXIT_FAILURE); }
-    int str_len = 0;
-    if (bos) tokens[(*n_tokens)++] = 1; // Assuming BOS token ID is 1
-    for (size_t i = 0; i < text_len; ++i) { // Use size_t for loop
-        str_buffer[str_len++] = (unsigned char)(text[i]); // Store bytes directly
-    }
-    while (1) {
-        float best_score = -1e10; int best_id = -1; int best_idx = -1;
-        for (int i=0; i < str_len - 1; i++) {
-            char merge_candidate[t->max_token_length * 2 + 1]; // Ensure buffer is safe based on max_token_length
-            char* piece1 = (str_buffer[i] < 256) ? (char*)t->byte_pieces + str_buffer[i] * 2 : t->vocab[str_buffer[i]];
-            char* piece2 = (str_buffer[i+1] < 256) ? (char*)t->byte_pieces + str_buffer[i+1] * 2 : t->vocab[str_buffer[i+1]];
-             // Check lengths before snprintf to prevent buffer overflow
-            if (strlen(piece1) + strlen(piece2) < sizeof(merge_candidate)) {
-               snprintf(merge_candidate, sizeof(merge_candidate), "%s%s", piece1, piece2);
-                int id = str_lookup(merge_candidate, t->sorted_vocab, t->vocab_size);
-                if (id != -1 && t->vocab_scores[id] > best_score) { best_score = t->vocab_scores[id]; best_id = id; best_idx = i; }
-            } // else: handle case where merged token is too long (optional)
-        }
-        if (best_idx == -1) break;
-        str_buffer[best_idx] = best_id;
-        for (int i = best_idx+1; i < str_len-1; i++) { str_buffer[i] = str_buffer[i+1]; }
-        str_len--;
-    }
-    for (int i=0; i < str_len; i++) { tokens[(*n_tokens)++] = str_buffer[i]; }
-    free(str_buffer);
-    if (eos) tokens[(*n_tokens)++] = 2; // Assuming EOS token ID is 2
-}
+ void free_tokenizer(Tokenizer *t) { if (!t) return; for (int i = 0; i < t->vocab_size; i++) { free(t->vocab[i]); } free(t->vocab); free(t->vocab_scores); free(t->sorted_vocab); }
+
+ char* decode(Tokenizer *t, int prev_token, int token) { if (token < 0 || token >= t->vocab_size) return NULL; char *piece = t->vocab[token]; if (prev_token == 1 && piece[0] == ' ') { piece++; } return piece; }
+ void safe_printf(char *piece) { if (piece == NULL || piece[0] == '\0') { return; } if (piece[1] == '\0') { unsigned char byte_val = piece[0]; if (!(isprint(byte_val) || byte_val == '\n')) { printf("?"); } else { printf("%c", byte_val); } } else { printf("%s", piece); } }
+ int str_lookup(char *str, TokenIndex *sorted_vocab, int vocab_size) { if (!str || !sorted_vocab) return -1; TokenIndex tok = {.str = str}; TokenIndex *res = (TokenIndex *)bsearch(&tok, sorted_vocab, vocab_size, sizeof(TokenIndex), compare_tokens); return res != NULL ? res->id : -1; }
+ void encode(Tokenizer *t, char *text, int8_t bos, int8_t eos, int *tokens, int *n_tokens) { /* ... implementation ... */
+     if (text == NULL) { fprintf(stderr, "cannot encode NULL text\n"); exit(EXIT_FAILURE); }
+     size_t text_len = strlen(text);
+     int *str_buffer = (int *)malloc((text_len + 1) * sizeof(int)); // Use size_t for strlen result
+     if (!str_buffer) { fprintf(stderr, "malloc failed\n"); exit(EXIT_FAILURE); }
+     int str_len = 0;
+     if (bos) tokens[(*n_tokens)++] = 1; // Assuming BOS token ID is 1
+     for (size_t i = 0; i < text_len; ++i) { // Use size_t for loop
+         str_buffer[str_len++] = (unsigned char)(text[i]); // Store bytes directly
+     }
+     while (1) {
+         float best_score = -1e10; int best_id = -1; int best_idx = -1;
+         for (int i=0; i < str_len - 1; i++) {
+             char merge_candidate[t->max_token_length * 2 + 1]; // Ensure buffer is safe based on max_token_length
+             char* piece1 = (str_buffer[i] < 256) ? (char*)t->byte_pieces + str_buffer[i] * 2 : t->vocab[str_buffer[i]];
+             char* piece2 = (str_buffer[i+1] < 256) ? (char*)t->byte_pieces + str_buffer[i+1] * 2 : t->vocab[str_buffer[i+1]];
+              // Check lengths before snprintf to prevent buffer overflow
+             if (strlen(piece1) + strlen(piece2) < sizeof(merge_candidate)) {
+                snprintf(merge_candidate, sizeof(merge_candidate), "%s%s", piece1, piece2);
+                 int id = str_lookup(merge_candidate, t->sorted_vocab, t->vocab_size);
+                 if (id != -1 && t->vocab_scores[id] > best_score) { best_score = t->vocab_scores[id]; best_id = id; best_idx = i; }
+             } // else: handle case where merged token is too long (optional)
+         }
+         if (best_idx == -1) break;
+         str_buffer[best_idx] = best_id;
+         for (int i = best_idx+1; i < str_len-1; i++) { str_buffer[i] = str_buffer[i+1]; }
+         str_len--;
+     }
+     for (int i=0; i < str_len; i++) { tokens[(*n_tokens)++] = str_buffer[i]; }
+     free(str_buffer);
+     if (eos) tokens[(*n_tokens)++] = 2; // Assuming EOS token ID is 2
+ }
+
+// ----------------------------------------------------------------------------
+// The Sampler, which takes logits and returns a sampled token
+// sampling can be done in a few ways: greedy argmax, sampling, top-p sampling
 
 // Sampler struct and functions (assuming no changes needed)
 // ... (Sampler code as provided before) ...
@@ -330,7 +360,9 @@ int sample(Sampler *sampler, float *logits) { int next; if (sampler->temperature
 // Utilities: time (assuming no changes needed)
 long time_in_ms() { struct timespec time; clock_gettime(CLOCK_REALTIME, &time); return time.tv_sec * 1000 + time.tv_nsec / 1000000; }
 
+
 // ----------------------------------------------------------------------------
+// generation loop
 // --- UPDATED generate function ---
 // Passes group_size_gs template parameter correctly
 template <int dim, int hidden_dim, int n_layers, int n_heads, int n_kv_heads,
@@ -339,7 +371,7 @@ void generate(
     // Use updated Transformer type
     Transformer<dim, hidden_dim, n_layers, n_heads, n_kv_heads,
                 vocab_size, seq_len, group_size_gs> *transformer,
-    Tokenizer *tokenizer, Sampler *sampler, char *prompt, int steps)
+    Tokenizer *tokenizer, Sampler *sampler, char *prompt, int steps,auto kernelpath)
 {
     const char *empty_prompt = "";
     if (prompt == NULL) { prompt = (char*)empty_prompt; }
@@ -359,74 +391,110 @@ void generate(
     memcpy(tokens, prompt_tokens, num_prompt_tokens * sizeof(int));
     free(prompt_tokens); // Free temporary prompt buffer
 
-    // Allocate logits buffer
-    float* logits = (float*)malloc(vocab_size * sizeof(float));
-    if (!logits) { fprintf(stderr, "malloc failed for logits\n"); free(tokens); exit(EXIT_FAILURE); }
-
-    // Calculate KV cache size and allocate
-    constexpr int kv_dim = (dim * n_kv_heads) / n_heads;
-    size_t kv_cache_size = (size_t)n_layers * seq_len * kv_dim; // Use size_t for large allocations
-    float* key_cache = (float*)malloc(kv_cache_size * sizeof(float));
-    float* value_cache = (float*)malloc(kv_cache_size * sizeof(float));
-    if (!key_cache || !value_cache) {
-        fprintf(stderr, "malloc failed for KV cache\n");
-        free(logits); free(tokens); free(key_cache); /* free value_cache if key_cache succeeded */
-        exit(EXIT_FAILURE);
-    }
-    memset(key_cache, 0, kv_cache_size * sizeof(float));
-    memset(value_cache, 0, kv_cache_size * sizeof(float));
-
-    std::cout << "Running inference for " << steps << " steps using split kernels..." << std::endl;
-
-    hls::stream<float> stream_init_to_pipeline_in("stream_init_to_pipeline_in");
-    hls::stream<float> stream_pipeline_out_to_final("stream_pipeline_out_to_final");
-
-    int pos = 0; // Current position in the sequence
-
-// --- Process Prompt Tokens ---
-int next_token; // 用于存储第一个生成步骤所需的 token
+    const char* basePathCStr = getenv("MODEL_BASE_PATH");
+    std::string model_base_path(basePathCStr);
+    std::string xclbin_path =model_base_path+ "/hw_emu/forward_hw_emu.xclbin"; // Default for CSIM
+  
+  std::cout << "Loading kernel..." << std::endl;
+  auto device = xrt::device(0);
+  auto uuid = device.load_xclbin(xclbin_path);
+  uuid = device.load_xclbin(kernelpath);
+  
+  
+  
+  auto initial_embedding_lookup_kernel = xrt::kernel(device, uuid, "initial_embedding_lookup");
+  auto transformer_layer_pipeline_kernel = xrt::kernel(device, uuid, "transformer_layer_pipeline"); 
+  auto final_norm_classifier_kernel = xrt::kernel(device, uuid, "final_norm_classifier");
 
 
-for (int t = 0; t < num_prompt_tokens; ++t) {
+  std::cout << "Allocating  buffer" << std::endl;
+ 
+  auto token_embedding_table=xrt::bo(device, sizeof(transformer->weights.token_embedding_table), initial_embedding_lookup_kernel.group_id(0));
+
+  
+  size_t cache_dim = n_layers * seq_len * ((dim * n_kv_heads) / n_heads);
+  auto w_buffer = xrt::bo(device, sizeof(transformer->weights), transformer_layer_pipeline_kernel.group_id(2));
+  auto w1_buffer = xrt::bo(device, sizeof(transformer->weights), transformer_layer_pipeline_kernel.group_id(3));
+  auto key_buffer = xrt::bo(device, cache_dim * sizeof(float), transformer_layer_pipeline_kernel.group_id(5));
+  auto value_buffer = xrt::bo(device, cache_dim * sizeof(float), transformer_layer_pipeline_kernel.group_id(6));
+
+
+  auto logits_out = xrt::bo(device, vocab_size * sizeof(float), final_norm_classifier_kernel.group_id(1));
+  auto w2_buffer  = xrt::bo(device, sizeof(transformer->weights), final_norm_classifier_kernel.group_id(2));
+
+  std::cout << "Allocating  buffer completing"<< std::endl;
+
+  std::cout << "Copying data to buffer" << std::endl;
+  std::cout << "编码表大小: " << sizeof(transformer->weights.token_embedding_table) << std::endl;
+  std::cout << "权重大小: " << sizeof(transformer->weights) << std::endl;
+  std::cout << "kvcache大小: " << cache_dim * sizeof(float) << std::endl;
+
+  
+  std::cout << "写入数据&&开始同步" << std::endl;
+  w_buffer.write(&transformer->weights, sizeof(transformer->weights), 0);
+  w1_buffer.write(&transformer->weights, sizeof(transformer->weights), 0);
+  w2_buffer.write(&transformer->weights, sizeof(transformer->weights), 0);
+  token_embedding_table.write(&transformer->weights.token_embedding_table, sizeof(transformer->weights.token_embedding_table), 0);
+  
+  w_buffer.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+  w1_buffer.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+  w2_buffer.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+  token_embedding_table.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+
+  std::cout << "写入结束&&同步结束" << std::endl;
+ 
+  int pos = 0;                  // position in the sequence
+  int next_token; // 用于存储第一个生成步骤所需的 token
+
+  // first run
+  for (int t = 0; t < num_prompt_tokens; ++t) {
     int current_token = tokens[t];
+    std::cout << "current_token: " << current_token << std::endl;
+    float *logits = (float *)malloc(vocab_size * sizeof(float));
     std::cout << "Processing prompt token " << t << "/" << num_prompt_tokens << " (pos=" << pos << ")" << std::endl; // Debug
+    //auto run = initial_embedding_lookup_kernel(token_embedding_table, current_token);
+    auto run1 = xrt::run(initial_embedding_lookup_kernel);
+    run1.set_arg(0, token_embedding_table);
+    run1.set_arg(1, current_token);
+    
+    //std::cout << "第一个kernal开始执行" << std::endl;
+    // run1.wait();
+    // std::cout << "第一个kernal执行结束" << std::endl;
 
-    // 1. Initial Embedding Lookup
-    // 将结果写入 pipeline Kernel 的输入流
-    initial_embedding_lookup(transformer->weights.token_embedding_table,
-                               current_token,
-                               stream_init_to_pipeline_in); // 使用连接 pipeline 的流
+    //auto run1 = transformer_layer_pipeline_kernel(w_buffer ,w1_buffer,pos, key_buffer, value_buffer);
+    auto run2 = xrt::run(transformer_layer_pipeline_kernel);
+    run2.set_arg(2, w_buffer);
+    run2.set_arg(3, w1_buffer);
+    run2.set_arg(4, pos);
+    run2.set_arg(5, key_buffer);
+    run2.set_arg(6, value_buffer);
+    
+    //std::cout << "第二个kernal开始执行" << std::endl;
+    // run2.wait();
+    // std::cout << "第二个kernal执行结束" << std::endl;
+   // auto run2 = final_norm_classifier_kernel(logits_out,w2_buffer);
+   auto run3 = xrt::run(final_norm_classifier_kernel);
+   run3.set_arg(1, logits_out);
+   run3.set_arg(2, w2_buffer);
 
-    // 2. 调用新的合并后的 Kernel，它内部会执行所有 n_layers 的计算
-    // 它读取 embedding 的输出，写入 final_norm 的输入
-    transformer_layer_pipeline(
-        stream_init_to_pipeline_in,     // Kernel 读取此流
-        stream_pipeline_out_to_final,   // Kernel 写入此流
-        &transformer->weights,          // 传递权重指针
-        &transformer->weights,
-        pos,                            // 传递当前位置
-        key_cache,                      // 传递 KV Cache 指针
-        value_cache                    // 传递 KV Cache 指针
-    );
-    // 3. Final Norm and Classifier
-    // 读取 pipeline Kernel 的输出流
-    final_norm_classifier(stream_pipeline_out_to_final, // 使用连接 pipeline 的流
-                          logits,
-                          &transformer->weights,
-                          (float)group_size_gs);
-
-    // --- 采样逻辑保持不变 ---
-    // 如果是最后一个 prompt token，为第一个生成步骤准备 next_token
-    if (t == num_prompt_tokens - 1) {
-         // Logits 现在包含了处理完最后一个 prompt token 后对下一个 token 的预测
-         next_token = sample(sampler, logits);
-    }
-
+   run1.start();
+   run2.start();
+   run3.start();
+   run3.wait();
+   run2.wait();
+   run1.wait();
+   logits_out.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
+   logits_out.read(logits, vocab_size * sizeof(float), 0);
+   if (t == num_prompt_tokens - 1) {
+        next_token = sample(sampler, logits);
+   }
     pos++; // 处理完一个 token，位置加一
 } // End of prompt processing loop
+long start = time_in_ms(); // Start timer after prompt processing
+std::cout << "\nPrompt: " <<prompt<< std::endl;
+std::cout << "Starting generation..." << std::endl;
+std::cout << "Answers: " << std::endl;
 
-    std::cout << "\nStarting generation..." << std::endl;
-    long start = time_in_ms(); // Start timer after prompt processing
 
 // --- Generate New Tokens (同样使用新的 Kernel 调用流程) ---
 for (int t = 0; t < steps; ++t) {
@@ -434,53 +502,48 @@ for (int t = 0; t < steps; ++t) {
     // 使用上一步采样的 token 作为当前输入
     int current_token = next_token;
     tokens[num_prompt_tokens + t] = current_token; // Store generated token
-
     // --- 解码和打印 ---
     int prev_token = (num_prompt_tokens + t > 0) ? tokens[num_prompt_tokens + t - 1] : 1; // BOS if first token
     char* piece = decode(tokenizer, prev_token, current_token);
     safe_printf(piece);
     fflush(stdout);
-
     // --- 如果生成 EOS token 则停止 ---
     if (current_token == 2) { // Assuming EOS token ID is 2
          printf("\n[EOS]");
          break;
     }
-
     // --- 检查序列长度是否超出限制 ---
     if (pos >= seq_len) {
         printf("\n[SEQUENCE LENGTH LIMIT REACHED]\n");
         break;
     }
+    float *logits = (float *)malloc(vocab_size * sizeof(float));
+    auto run1 = xrt::run(initial_embedding_lookup_kernel);
+    run1.set_arg(0, token_embedding_table);
+    run1.set_arg(1, current_token);
 
-    // 1. Initial Embedding Lookup
-    // (输入: current_token, 输出到 stream_init_to_pipeline_in)
-    initial_embedding_lookup(transformer->weights.token_embedding_table,
-                               current_token,
-                               stream_init_to_pipeline_in); // 使用之前声明的流
+    auto run2 = xrt::run(transformer_layer_pipeline_kernel);
+    run2.set_arg(2, w_buffer);
+    run2.set_arg(3, w1_buffer);
+    run2.set_arg(4, pos);
+    run2.set_arg(5, key_buffer);
+    run2.set_arg(6, value_buffer);
 
-    // 2. 调用新的合并后的 Kernel (它内部执行所有 n_layers 计算)
-    // (输入: stream_init_to_pipeline_in, 输出到 stream_pipeline_out_to_final)
-    transformer_layer_pipeline(
-        stream_init_to_pipeline_in,     // Kernel 读取此流
-        stream_pipeline_out_to_final,   // Kernel 写入此流
-        &transformer->weights,          // 传递权重指针
-        &transformer->weights,
-        pos,                            // 传递当前位置
-        key_cache,                      // 传递 KV Cache 指针
-        value_cache                    // 传递 KV Cache 指针
-    );
+    auto run3 = xrt::run(final_norm_classifier_kernel);
+    run3.set_arg(1, logits_out);
+    run3.set_arg(2, w2_buffer);
+ 
 
-    // 3. Final Norm and Classifier
-    // (输入: stream_pipeline_out_to_final)
-    final_norm_classifier(stream_pipeline_out_to_final, // 使用之前声明的流
-                          logits,
-                          &transformer->weights,
-                          (float)group_size_gs);
-
+    run1.start();
+    run2.start();
+    run3.start();
+    run3.wait();;
+    run2.wait();
+    run1.wait();
+    logits_out.sync(XCL_BO_SYNC_BO_FROM_DEVICE);
+    logits_out.read(logits, vocab_size * sizeof(float), 0);
     // --- 采样下一个 token ---
     next_token = sample(sampler, logits); // 使用修正后的调用
-
     pos++; // 位置加一，为处理下一个生成的 token 做准备
 } // End of generation loop
     printf("\n");
@@ -500,30 +563,46 @@ for (int t = 0; t < steps; ++t) {
     }
 
 
-    // Cleanup
-    free(tokens);
-    free(logits);
-    free(key_cache);
-    free(value_cache);
+    // // Cleanup
+    free(prompt_tokens);
+    // free(tokens);
+    // free(logits_out);
+    // free(key_buffer);
+    // free(value_buffer);
     std::cout << "Generation completed successfully." << std::endl;
 }
+
 
 // --- Utilities: read_stdin (assuming no changes needed) ---
 void read_stdin(const char *guide, char *buffer, size_t bufsize) { printf("%s", guide); if (fgets(buffer, bufsize, stdin) != NULL) { size_t len = strlen(buffer); if (len > 0 && buffer[len - 1] == '\n') { buffer[len - 1] = '\0'; } } }
 
+
 // ----------------------------------------------------------------------------
-// --- UPDATED main function ---
-// Uses global GS from config.h when instantiating/calling templates
-// ----------------------------------------------------------------------------
+// CLI, include only if not testing
+void error_usage()
+{
+  fprintf(stderr, "Usage:   run <checkpoint> [options]\n");
+  fprintf(stderr, "Example: run model.bin -n 256 -i \"Once upon a time\"\n");
+  fprintf(stderr, "Options:\n");
+  fprintf(stderr, "  -t <float>  temperature in [0,inf], default 1.0\n");
+  fprintf(stderr, "  -p <float>  p value in top-p (nucleus) sampling in [0,1] default 0.9\n");
+  fprintf(stderr, "  -s <int>    random seed, default time(NULL)\n");
+  fprintf(stderr, "  -n <int>    number of steps to run for, default 256. 0 = max_seq_len\n");
+  fprintf(stderr, "  -i <string> input prompt\n");
+  fprintf(stderr, "  -z <string> optional path to custom tokenizer\n");
+  fprintf(stderr, "  -m <string> mode: generate|chat, default: generate\n");
+  fprintf(stderr, "  -y <string> (optional) system prompt in chat mode\n");
+  exit(EXIT_FAILURE);
+}
+
 int main(int argc, char *argv[]) {
     std::cout << "Start - Testbench for Split Kernels (Quantized)" << std::endl;
 
     const char* basePathCStr = getenv("MODEL_BASE_PATH");
     std::string model_base_path(basePathCStr);
-    // std::string checkpoint_path = model_base_path+ "/weights.bin"; // Default for CSIM
-    std::string checkpoint_path = model_base_path+ "/weights_Q4.bin";
+    std::string checkpoint_path =model_base_path+ "/weights.bin"; // Default for CSIM
     std::string tokenizer_path = model_base_path+"/tokenizer.bin"; // Default for CSIM
-    
+  
     float temperature = 0.0f; // Default to argmax (deterministic) for testing
     float topp = 0.9f;      // Top-p (not used if temp=0)
     int steps = seq_len;    // Default steps = max sequence length
@@ -531,13 +610,8 @@ int main(int argc, char *argv[]) {
     unsigned long long rng_seed = 1234; // Fixed seed for deterministic testing
     const char *mode = "generate"; // Default mode
     char *system_prompt = NULL; // Default system prompt
+    std::string kernelpath = "";
 
-    // AP INT Check
-    // std::cout << "AP INT8 Size:" << sizeof(ap_int<8>) << std::endl;
-    // std::cout << "AP INT7 Size:" << sizeof(ap_int<7>) << std::endl;
-    // std::cout << "AP INT6 Size:" << sizeof(ap_int<6>) << std::endl;
-    // std::cout << "AP INT5 Size:" << sizeof(ap_int<5>) << std::endl;
-    // std::cout << "AP INT4 Size:" << sizeof(ap_int<4>) << std::endl;
 
     // --- Argument Parsing (CSIM Friendly) ---
      if (argc >= 2) {
@@ -555,6 +629,7 @@ int main(int argc, char *argv[]) {
                  case 'z': tokenizer_path = argv[i + 1]; break;
                  case 'm': mode = argv[i + 1]; break;
                  case 'y': system_prompt = argv[i + 1]; break;
+                 case 'k': kernelpath = argv[i + 1];break;
                  default: std::cerr << "WARN: Unknown option '" << argv[i] << "'. Ignoring." << std::endl; break;
              }
          }
@@ -604,8 +679,7 @@ int main(int argc, char *argv[]) {
     // --- Run Generation ---
     if (strcmp(mode, "generate") == 0) {
         // Call generate which uses the global GS via template arg
-        generate<dim, hidden_dim, n_layers, n_heads, n_kv_heads,
-                 vocab_size, seq_len, GS>(&transformer, &tokenizer, &sampler, prompt, steps);
+        generate(&transformer, &tokenizer, &sampler, prompt, steps, kernelpath);
     } else {
         fprintf(stderr, "ERROR: unknown mode: %s\n", mode);
         free_sampler(&sampler);

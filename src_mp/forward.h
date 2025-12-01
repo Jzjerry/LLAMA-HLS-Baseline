@@ -159,9 +159,10 @@ void rmsnorm(float o[S], const float x[S], const float weight[S]) {
 
 sum_of_squares:
     for (int j = 0; j < S; j++) {
-#pragma HLS PIPELINE II=1
+// #pragma HLS PIPELINE
 #pragma HLS UNROLL factor=2 skip_exit_check // 示例因子
         float x_j = x_buff[j];
+        // Critical Path!!!!
         ss += x_j * x_j;
     }
     ss /= S;
@@ -170,7 +171,7 @@ sum_of_squares:
 
 norm_and_scale:
     for (int j = 0; j < S; j++) {
-#pragma HLS PIPELINE II=1
+// #pragma HLS PIPELINE II=1
 #pragma HLS UNROLL factor=2 // 示例因子
         float weight_j = weight_buff[j];
         float x_j = x_buff[j];
@@ -194,9 +195,10 @@ max:
     }
     float sum = 0.0f;
 exp_sum: // Merged loop from previous example version
+    // Critical Path!!!!
     for (int i = 0; i < size; i++) {
 #pragma HLS loop_tripcount min = 1 max = seq_len avg = seq_len/2
-#pragma HLS PIPELINE II=1
+// #pragma HLS PIPELINE II=1
 #pragma HLS UNROLL factor = 2 // Example factor
         buffer[i] = hls::expf(x[i] - max_val);
         sum += buffer[i];
@@ -205,13 +207,13 @@ exp_sum: // Merged loop from previous example version
 norm:
     for (int i = 0; i < size; i++) {
 #pragma HLS loop_tripcount min = 1 max = seq_len avg = seq_len/2
-#pragma HLS PIPELINE II=1
+// #pragma HLS PIPELINE II=1
 #pragma HLS UNROLL factor = 2 // Example factor
         x[i] = buffer[i] * inv_sum;
     }
 }
 
-const int MATMUL_UNROLL_FACTOR = 8;
+const int MATMUL_UNROLL_FACTOR = 16;
 template <typename XT, typename WT, int N, int D>
 // const 限定符已在上次修正中添加
 // 此函数内部逻辑依赖于全局 GS 常量，并处理从 QuantizedTensor 传入的原始指针
@@ -277,7 +279,7 @@ xs_buff:
         
     dot_product_groups:
         for (int j = 0; j < N / GS; ++j) { // Loop over groups
-        #pragma HLS UNROLL factor = MATMUL_UNROLL_FACTOR// Unroll group calculation
+        // #pragma HLS UNROLL factor = MATMUL_UNROLL_FACTOR// Unroll group calculation
             int32_t ival = 0;
         #pragma HLS BIND_OP variable=ival op=mul impl=fabric
         inner_dot:
