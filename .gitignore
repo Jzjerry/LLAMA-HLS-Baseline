@@ -2,6 +2,7 @@ csim
 synth
 sw_emu
 hw_end1
+hw_end_mp
 
 .Xil
 

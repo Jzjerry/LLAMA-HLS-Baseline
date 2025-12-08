@@ -8,4 +8,4 @@ g++ -g -std=c++17 -Wall -O0 ./host_mp/llama2.cpp \
     -z ./tokenizer.bin \
     -n 256 \
     -i "Once" \
-    -k ./host_mp/forward.xclbin
+    -k ./hw_end_mp/forward.xclbin

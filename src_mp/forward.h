@@ -70,21 +70,9 @@ void dequantize(const QuantizedTensor<DT, S, GROUP_SIZE> *qx, float x[S], int gr
         x[i] = qx->q[i] * qx->s[scale_idx];
     }
 }
-
 // --- UPDATED Signature & FIXED hardcoded 64 ---
 template <typename DT, int S, int GROUP_SIZE> // Added GROUP_SIZE template parameter
 void quantize(QuantizedTensor<DT, S, GROUP_SIZE> *qx, const float x[S], int group_size) { // made x const, Renamed param
-
-    // Check parameter consistency (optional but good)
-    // if (group_size <= 0 || group_size != GROUP_SIZE || S % group_size != 0) {
-    //     // Handle error or default behavior
-    //     memset(qx->q, 0, S * sizeof(DT));
-    //     int scale_size = (S > 0 && group_size > 0 && S % group_size == 0) ? (S / group_size) : 0;
-    //     if (scale_size > 0) {
-    //         memset(qx->s, 0, scale_size * sizeof(float));
-    //     }
-    //     return;
-    // }
 
     constexpr float Q_MAX = QuantTraits<DT>::qmax;
     // Calculate num_groups based on the 'group_size' parameter
@@ -95,8 +83,8 @@ void quantize(QuantizedTensor<DT, S, GROUP_SIZE> *qx, const float x[S], int grou
     float scale_buffer[num_groups];
     DT quantized_buffer[S];
 
-#pragma HLS ARRAY_PARTITION variable = quantized_buffer type = cyclic factor = 64 // Example factor, adjust as needed
-#pragma HLS ARRAY_PARTITION variable = scale_buffer type = cyclic factor = 16   // Example factor, adjust as needed
+#pragma HLS ARRAY_PARTITION variable = quantized_buffer type = cyclic factor = 64
+#pragma HLS ARRAY_PARTITION variable = scale_buffer type = cyclic factor = 16
 
 main_loop:
     for (int group = 0; group < num_groups; group++) {
@@ -109,7 +97,6 @@ main_loop:
     max_val_loop:
         // Use 'group_size' parameter
         for (int i = 0; i < group_size; i++) {
-        #pragma HLS PIPELINE // Inner loop pipeline may or may not be needed/beneficial
             float val = hls::fabs(x[base_idx + i]);
             if (val > wmax) {
                 wmax = val;
@@ -123,12 +110,12 @@ main_loop:
     quant_loop:
         // Use 'group_size' parameter
         for (int i = 0; i < group_size; i++) {
-        #pragma HLS PIPELINE // Inner loop pipeline may or may not be needed/beneficial
             float quant_value = (scale != 0.0f) ? (x[base_idx + i] * inv_scale) : 0.0f;
             // Clamp using ternary operators or std::min/max if available/synthesizable
             quant_value = (quant_value > Q_MAX) ? Q_MAX : quant_value;
             quant_value = (quant_value < -Q_MAX) ? -Q_MAX : quant_value;
-            DT quantized = (DT)hls::roundf(quant_value);
+            // DT quantized = (DT)hls::roundf(quant_value);  // This is very bad!
+            DT quantized = (int8_t)hls::roundf(quant_value);
             quantized_buffer[base_idx + i] = quantized;
         }
     }
@@ -138,6 +125,9 @@ main_loop:
     for(int i = 0; i < S; i++) {
         qx->q[i] = quantized_buffer[i];
     }
+    // for(int i = 0; i < S; i+=2) {
+    //     (qx->q[i], qx->q[i+1]) = (quantized_buffer[i], quantized_buffer[i+1]);
+    // }
     // Copy correct number of scales
     std::memcpy(qx->s, scale_buffer, num_groups * sizeof(float)); // <<< Correct size based on num_groups
 }
@@ -247,7 +237,7 @@ xs_buff:
 
 
     for (int i = 0; i < D; i++) { // Loop over output dimension
-        // #pragma HLS PIPELINE II=1
+        #pragma HLS PIPELINE
         float val = 0.0f;
         WT w_buffer[N];
         // 大小基于全局 GS
@@ -284,7 +274,7 @@ xs_buff:
         #pragma HLS BIND_OP variable=ival op=mul impl=fabric
         inner_dot:
             for(int k=0; k<GS; ++k) { // Loop within group
-            #pragma HLS UNROLL factor = MATMUL_UNROLL_FACTOR// Unroll inner dot product
+            // #pragma HLS UNROLL factor = MATMUL_UNROLL_FACTOR// Unroll inner dot product
                 // Use static buffers loaded earlier
                 ival += x_buffer[j*GS + k] * w_buffer[j*GS + k];
             }
